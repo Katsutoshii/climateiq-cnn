@@ -739,6 +739,10 @@ def test_build_label_matrix_wrf(
 ):
     # Create an in-memory mock netcdf file and grab its bytes
     ncfile = netCDF4.Dataset("met_em.d03_test.nc", mode="w", format="NETCDF4", memory=1)
+    ncfile.createDimension("Time", 1)
+    time = ncfile.createVariable("Times", "str", ("Time",))
+    time[0] = "2010-02-02_18:00:00"
+
     memfile = ncfile.close()
     ncfile_bytes = memfile.tobytes()
 
@@ -819,7 +823,11 @@ def test_build_label_matrix_wrf(
             mock.call().collection("simulations"),
             mock.call().collection().document("study_area-None"),
             mock.call().collection().document().collection("label_chunks"),
-            mock.call().collection().document().collection().document("None_None"),
+            mock.call()
+            .collection()
+            .document()
+            .collection()
+            .document("2010-02-02 18:00:00"),
             mock.call()
             .collection()
             .document()
@@ -831,8 +839,7 @@ def test_build_label_matrix_wrf(
                         "gs://climateiq-study-area-label-chunks/study_area/"
                         "wrfout.d03_test.npy"
                     ),
-                    "x_index": None,
-                    "y_index": None,
+                    "time": datetime.datetime(2010, 2, 2, 18, 0, 0),
                 }
             ),
         ]

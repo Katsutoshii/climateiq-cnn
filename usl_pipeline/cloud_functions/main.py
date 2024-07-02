@@ -318,20 +318,22 @@ def _build_label_matrix(bucket_name: str, chunk_name: str, output_bucket: str) -
     with chunk_blob.open("rb") as chunk:
         # Heat (WRF) - treat one WRF output file as one chunk
         if re.search(file_names.WRF_DOMAIN3_NC_REGEX, chunk_name):
-            label_matrix = _build_wrf_label_matrix(chunk)
+            label_matrix, metadata = _build_wrf_label_matrix(chunk)
 
             label_file_name = chunk_name + ".npy"
             label_blob = storage_client.bucket(output_bucket).blob(str(label_file_name))
 
             _write_as_npy(label_blob, label_matrix)
-            _write_wrf_label_chunk_metastore_entry(chunk_blob, label_blob)
+            _write_wrf_label_chunk_metastore_entry(chunk_blob, label_blob, metadata)
         else:
             raise ValueError(f"Unexpected file {chunk_name}")
 
 
-def _build_wrf_label_matrix(fd: IO[bytes]) -> NDArray:
+def _build_wrf_label_matrix(fd: IO[bytes]) -> Tuple[NDArray, FeatureMetadata]:
     label_components = []
     with netCDF4.Dataset("ncfile", mode="r", memory=fd.read()) as nc:
+        nc.set_auto_mask(False)
+        snapshot_time = nc.variables["Times"][:][0]
         # Variable names are listed here according to the formatting
         # specified by wrf-python documentation
         # https://wrf-python.readthedocs.io/en/latest/user_api/generated/wrf.getvar.html#wrf-getvar
@@ -348,26 +350,27 @@ def _build_wrf_label_matrix(fd: IO[bytes]) -> NDArray:
                 label_components.append(numpy.swapaxes(label, 0, 1))
 
     labels_matrix = numpy.dstack(label_components)
-    return labels_matrix
+    return labels_matrix, FeatureMetadata(
+        time=datetime.datetime.fromisoformat(str(snapshot_time))
+    )
 
 
 def _write_wrf_label_chunk_metastore_entry(
-    chunk_blob: storage.Blob, label_blob: storage.Blob
+    chunk_blob: storage.Blob, label_blob: storage.Blob, metadata: FeatureMetadata
 ) -> None:
     """Updates the metastore with new information for the given wrf chunks.
 
     Args:
       chunk_blob: The GCS blob containing the raw chunk.
       label_blob: The GCS blob containing the label tensor for the chunk.
+      metadata: Additional metadata describing the features.
     """
     db = firestore.Client()
     study_area_name = _parse_chunk_path(chunk_blob.name)[0]
 
-    metastore.SimulationLabelChunk(
+    metastore.SimulationLabelTemporalChunk(
         gcs_uri=f"gs://{label_blob.bucket.name}/{label_blob.name}",
-        # Not relevant for WRF sims
-        x_index=None,
-        y_index=None,
+        time=metadata.time,
     ).set(db, study_area_name, config_path=None)
 
 
@@ -601,7 +604,7 @@ def _collapse_city_cat_output_chunks(
             # invocation was running.
             continue
 
-    metastore.SimulationLabelChunk(
+    metastore.SimulationLabelSpatialChunk(
         gcs_uri=f"gs://{labels_bucket.name}/{label_path}",
         x_index=int(x_index),
         y_index=int(y_index),
