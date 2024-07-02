@@ -424,6 +424,7 @@ class SimulationLabelChunk:
         for chunk_ref in ref.list_documents():
             yield cls(**chunk_ref.get().to_dict())
 
+
 @dataclasses.dataclass(slots=True)
 class SimulationLabelSpatialChunk(SimulationLabelChunk):
     """A sub-area chunk of a larger study area.
@@ -443,6 +444,7 @@ class SimulationLabelSpatialChunk(SimulationLabelChunk):
             SIMULATION_LABEL_CHUNKS
         ).document(id_).set(dataclasses.asdict(self))
 
+
 @dataclasses.dataclass(slots=True)
 class SimulationLabelTemporalChunk(SimulationLabelChunk):
     """A sub-area chunk of a larger study area.
@@ -456,7 +458,5 @@ class SimulationLabelTemporalChunk(SimulationLabelChunk):
     def set(self, db: firestore.Client, study_area_name: str, config_path: str) -> None:
         """Adds the label chunk to the given simulation."""
         Simulation.get_ref(db, study_area_name, config_path).collection(
-                SIMULATION_LABEL_CHUNKS
-            ).document(str(self.time)).set(dataclasses.asdict(self))
-
-    
+            SIMULATION_LABEL_CHUNKS
+        ).document(str(self.time)).set(dataclasses.asdict(self))
