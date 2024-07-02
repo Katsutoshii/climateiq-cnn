@@ -142,14 +142,14 @@ def test_simulation_get_set_label_chunks(firestore_db):
         == simulation
     )
 
-    chunk_1 = metastore.SimulationLabelChunk(
+    chunk_1 = metastore.SimulationLabelSpatialChunk(
         gcs_uri="gs://sim-chunks/study-area/config/name.txt/0_0.npy",
         x_index=0,
         y_index=0,
     )
     chunk_1.set(firestore_db, "study-area", "config/name.txt")
 
-    chunk_2 = metastore.SimulationLabelChunk(
+    chunk_2 = metastore.SimulationLabelSpatialChunk(
         gcs_uri="gs://sim-chunks/study-area/config/name.txt/0_1.npy",
         x_index=1,
         y_index=0,
@@ -157,7 +157,7 @@ def test_simulation_get_set_label_chunks(firestore_db):
     chunk_2.set(firestore_db, "study-area", "config/name.txt")
 
     chunks = list(
-        metastore.SimulationLabelChunk.list_chunks(
+        metastore.SimulationLabelSpatialChunk.list_chunks(
             firestore_db, "study-area", "config/name.txt"
         )
     )
