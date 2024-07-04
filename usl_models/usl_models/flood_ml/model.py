@@ -1,18 +1,24 @@
 """Flood model definition."""
 
+import gc
 import dataclasses
 from typing import TypeAlias
+from functools import partial
 
-import tensorflow as tf
-from tensorflow.keras import layers
+import keras
+from keras import layers
 
 from usl_models.flood_ml import constants
 from usl_models.flood_ml import data_utils
 from usl_models.flood_ml import model_params
 
-st_tensor: TypeAlias = tf.Tensor
-geo_tensor: TypeAlias = tf.Tensor
-temp_tensor: TypeAlias = tf.Tensor
+import jax
+import jax.numpy as jnp
+
+
+st_tensor: TypeAlias = jnp.ndarray
+geo_tensor: TypeAlias = jnp.ndarray
+temp_tensor: TypeAlias = jnp.ndarray
 FloodModelData: TypeAlias = data_utils.FloodModelData
 FloodModelParams: TypeAlias = model_params.FloodModelParams
 
@@ -37,16 +43,18 @@ class FloodModel:
         self._spatial_dims = spatial_dims
         self._model = self._build_model()
 
-    def _build_model(self) -> tf.keras.Model:
+    def _build_model(self) -> keras.Model:
         """Creates the correct internal (Keras) model architecture."""
         model = FloodConvLSTM(self._model_params, spatial_dims=self._spatial_dims)
+
         model.compile(
             optimizer=self._model_params.optimizer,
-            loss=tf.keras.losses.MeanSquaredError(),
+            loss=keras.losses.MeanSquaredError(),
             metrics=[
-                tf.keras.metrics.MeanAbsoluteError(),
-                tf.keras.metrics.RootMeanSquaredError(),
+                keras.metrics.MeanAbsoluteError(),
+                keras.metrics.RootMeanSquaredError(),
             ],
+            run_eagerly=True
         )
         return model
 
@@ -90,7 +98,7 @@ class FloodModel:
         # the expected shape. Otherwise, create the window view.
         # Updates to support tf.dataset
         first_temporal = next(iter(data.temporal.take(1)))
-        if tf.rank(first_temporal) == 3:  # windowed: (B, T_max, m)
+        if jnp.linalg.matrix_rank(first_temporal) == 3:  # windowed: (B, T_max, m)
             assert first_temporal.shape[-1] == self._model_params.m_rainfall, (
                 "Mismatch between the temporal data window size "
                 f"({first_temporal.shape[-1]}) and the expected window size "
@@ -107,7 +115,7 @@ class FloodModel:
         st_input = data.spatiotemporal
         if st_input is None:
             st_shape = first_spatiotemporal.geospatial.shape[:3] + [1]
-            st_input = tf.zeros(st_shape)
+            st_input = jnp.zeros(st_shape)
 
         data = dataclasses.replace(data, spatiotemporal=st_input)
         return data
@@ -136,19 +144,16 @@ class FloodModel:
     #     )
     #     return history
 
-    def _model_fit(self, features, labels, storm_duration):
-        # convert storm_duration to int
-        storm_duration = int(storm_duration)
-
-        self._model.set_n_predictions(storm_duration)
-
+    def _model_fit(self, dataset, config):
+        self._model.set_n_predictions(config.storm_duration)
+        tensorboard_callback = keras.callbacks.TensorBoard(log_dir="logs", histogram_freq=1)
         # Fit the model for this batch
         history = self._model.fit(
-            features,
-            labels,
+            dataset,
             epochs=self._model_params.epochs,
+            callbacks=[tensorboard_callback]
         )
-        
+
         return history
 
     def _combine_histories(self, history_list):
@@ -160,14 +165,13 @@ class FloodModel:
                 combined_history[key].extend(value)
         return combined_history
 
-    def train(self, dataset: tf.data.Dataset):
+    def train(self, dataset, config):
         model_history = []
-        for (features, labels), storm_duration in dataset:
-            history = self._model_fit(
-                features, labels, storm_duration=storm_duration
-            )
-            model_history.append(history)
-        
+
+        history = self._model_fit(dataset, config)
+        model_history.append(history)
+        # for (features, labels) in dataset:
+
         # Combine all histories after processing all batches
         combined_history = self._combine_histories(model_history)
         return combined_history
@@ -216,7 +220,7 @@ class FloodModel:
 ###############################################################################
 
 
-class FloodConvLSTM(tf.keras.Model):
+class FloodConvLSTM(keras.Model):
     """Flood ConvLSTM model.
 
     The architecture is an autoregressive ConvLSTM. Spatiotemporal and
@@ -256,7 +260,7 @@ class FloodConvLSTM(tf.keras.Model):
 
         # Spatiotemporal CNN
         st_cnn_params = {"strides": 2, "padding": "same", "activation": "relu"}
-        self.st_cnn = tf.keras.Sequential(
+        self.st_cnn = keras.Sequential(
             [
                 # Input shape: (time_steps, height, width, channels)
                 layers.InputLayer((None, self._spatial_height, self._spatial_width, 1)),
@@ -276,7 +280,7 @@ class FloodConvLSTM(tf.keras.Model):
 
         # Geospatial CNN
         geo_cnn_params = {"strides": 2, "padding": "same", "activation": "relu"}
-        self.geo_cnn = tf.keras.Sequential(
+        self.geo_cnn = keras.Sequential(
             [
                 # Input shape: (height, width, channels)
                 layers.InputLayer(
@@ -297,7 +301,7 @@ class FloodConvLSTM(tf.keras.Model):
         conv_lstm_height = self._spatial_height // 4
         conv_lstm_width = self._spatial_width // 4
         conv_lstm_channels = 16 + 64 + self._params.m_rainfall
-        self.conv_lstm = tf.keras.Sequential(
+        self.conv_lstm = keras.Sequential(
             [
                 # Input shape: (time_steps, height, width, channels)
                 layers.InputLayer(
@@ -318,7 +322,7 @@ class FloodConvLSTM(tf.keras.Model):
 
         # Output CNN (upsampling via TransposeConv)
         output_cnn_params = {"padding": "same", "activation": "relu"}
-        self.output_cnn = tf.keras.Sequential(
+        self.output_cnn = keras.Sequential(
             [
                 # Input shape: (height, width, channels)
                 layers.InputLayer(
@@ -339,7 +343,8 @@ class FloodConvLSTM(tf.keras.Model):
         st_input: st_tensor,
         geo_input: geo_tensor,
         temp_input: temp_tensor,
-    ) -> tf.Tensor:
+        training: bool | None = None,
+    ) -> jnp.ndarray:
         """Makes a single forward pass on a batch of data.
 
         The forward pass represents a single prediction on an input batch
@@ -362,27 +367,39 @@ class FloodConvLSTM(tf.keras.Model):
         # [B, H, W, f ]-> [B, H', W', k2]
         # Add a new time axis and repeat n times -> [B, n, H', W', k2].
         geo_cnn_output = self.geo_cnn(geo_input)
-        geo_cnn_output = geo_cnn_output[:, tf.newaxis, :, :, :]
-        n = st_input.shape[1]
-        geo_cnn_output = tf.repeat(geo_cnn_output, [n], axis=1)
+        geo_cnn_output = geo_cnn_output[:, jnp.newaxis, :, :, :]
+        # n = st_input.shape[1]
+        print('N', st_input.shape[1])
+        print('geo_cnn_output', geo_cnn_output.shape)
+        geo_cnn_output = jnp.repeat(geo_cnn_output, jnp.array(
+            [constants.MAX_TIMESTEPS]), axis=1, total_repeat_length=constants.MAX_TIMESTEPS)
+        print('geo_cnn_output', geo_cnn_output.shape)
 
         # Expand temporal inputs into maps
         # [B, n, m] -> [B, n, H', W', m]
         H_out = st_cnn_output.shape[2]
         W_out = st_cnn_output.shape[3]
-        temp_input = temp_input[:, :, tf.newaxis, tf.newaxis, :]
-        temp_input = tf.tile(temp_input, [1, 1, H_out, W_out, 1])
+        temp_input = temp_input[:, :, jnp.newaxis, jnp.newaxis, :]
+        temp_input = jnp.tile(temp_input, [1, 1, H_out, W_out, 1])
 
         # Concatenate and feed into remaining ConvLSTM and TransposeConv layers
         # [B, n, H', W', k'] -> [B, H, W, 1]
-        lstm_input = tf.concat([st_cnn_output, geo_cnn_output, temp_input], axis=-1)
-        lstm_output = self.conv_lstm(lstm_input)
+        B, N, _, _, _ = st_cnn_output.shape
+        # mask = jnp.ones((B, N), dtype=jnp.bool)
+        # mask.at[:, n:].set(False)
+        lstm_input = jnp.concat([st_cnn_output, geo_cnn_output, temp_input], axis=-1)
+        print('lstm_input', lstm_input.shape)
+        lstm_output = self.conv_lstm(lstm_input, training=training)
         output = self.output_cnn(lstm_output)
 
         return output
 
-    def call(self, inputs: dict[str, tf.Tensor]) -> tf.Tensor:
+    def call(self, inputs: list[jax.Array], training: bool | None = None) -> jnp.ndarray:
         """Runs the entire autoregressive model.
+
+        st_input0: Flood maps tensor of shape [B, H, W, 1].
+        geo_input: Geospatial tensor of shape [B, H, W, f].
+        temp_input: Rainfall windows tensor of shape [B, n, m].
 
         Args:
             inputs: A dictionary of input tensors.
@@ -390,69 +407,27 @@ class FloodConvLSTM(tf.keras.Model):
         Returns:
             A tensor of all the flood predictions: [B, T, H, W].
         """
-        st_input = inputs["spatiotemporal"]
-        geo_input = inputs["geospatial"]
-        full_temp_input = inputs["temporal"]
+        st_input0 = inputs[constants.SPATIOTEMPORAL]
+        geo_input = inputs[constants.GEOSPATIAL]
+        full_temp_input = inputs[constants.TEMPORAL]
+
+        print('st_input0:', st_input0.shape)
+        print('geo_input:', geo_input.shape)
+        print('full_temp_input:', full_temp_input.shape)
+
+        B, H, W, _ = st_input0.shape
+        st = jnp.zeros((B, constants.MAX_TIMESTEPS, H, W, 1))
+        st = st.at[:, 0].set(st_input0)
 
         # This array stores the initial flood map and the n_predictions.
         # The initial flood map is added to align indexing between flood maps
         # and rainfall, i.e., the current flooding conditions and rainfall at
         # time t are stored at index t along the temporal axis.
-        flood_maps = tf.TensorArray(
-            tf.float32, size=self._n_predictions + 1, clear_after_read=False
-        )
-        flood_maps = flood_maps.write(0, st_input)
 
         # We use 1-indexing for simplicity. Time step t represents the t-th flood
         # prediction.
         for t in range(1, self._n_predictions + 1):
-            st_input, temp_input = self._update_temporal_inputs(
-                flood_maps, full_temp_input, t
-            )
-            print("st_input shape:", tf.shape(st_input))
-            print("geo_input shape:", tf.shape(geo_input))
-            print("temp_input shape:", tf.shape(temp_input))
-            prediction = self.forward(st_input, geo_input, temp_input)
-            flood_maps = flood_maps.write(t, prediction)
-
-        # Concatenate the predictions.
-        # This gathers the predictions along axis 0, so we need to permute the
-        # time (0) and batch (1) axes.
-        predictions = flood_maps.gather(tf.range(1, self._n_predictions + 1))
-        predictions = tf.transpose(predictions, perm=[1, 0, 2, 3, 4])
-        predictions = tf.squeeze(predictions, axis=-1)
-
-        # Close the TensorArray and clean up the cached geo_cnn_output.
-        flood_maps.close()
-        self.geo_cnn_output = None
-
-        return predictions
-
-    def _update_temporal_inputs(
-        self, flood_maps: tf.TensorArray, full_temp_input: tf.Tensor, t: int
-    ) -> tuple[tf.Tensor, tf.Tensor]:
-        """Updates temporal inputs for a new time step (prediction).
-
-        Returns the appropriate rainfall and flood map inputs for the t-th
-        prediction. The number n of flood maps and rainfall windows returned is
-        the minimum of self._params.n_flood_maps and t.
-
-        Args:
-            flood_maps: A TensorArray of all flood maps.
-            full_time_input: The [T, m] tensor of all rainfall windows. This
-                function retrieves the appropriate windows given the time step.
-            t: Time step in the autoregression.
-
-        Returns:
-            A tuple of tensors for the flood maps and rainfall, having shapes
-            [n, H, W, 1] and [n, m], respectively.
-        """
-        n = min(self._params.n_flood_maps, t)
-        step_range = tf.range(t - n, t)
-        # Gather the relevant flood maps. This will stack them along axis 0, so
-        # we need to permute the time (0) and batch (1) axes.
-        st_input = flood_maps.gather(step_range)
-        st_input = tf.transpose(st_input, perm=[1, 0, 2, 3, 4])
-        # Gather the relevant rainfall windows.
-        temp_input = tf.gather(full_temp_input, step_range, axis=1)
-        return (st_input, temp_input)
+            print("\n----------------------------------------------------------------")
+            st_t = self.forward(st, geo_input, full_temp_input, training=training)
+            st = st.at[:, t].set(st_t)
+        return st
