@@ -1,13 +1,14 @@
 """Flood model parameters."""
 
-from dataclasses import dataclass
+import dataclasses
 
 import tensorflow as tf
 
 from usl_models.flood_ml import constants
+from typing import Any
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclasses.dataclass(kw_only=True, slots=True)
 class FloodModelParams:
     # General parameters.
     batch_size: int = 64
@@ -24,7 +25,7 @@ class FloodModelParams:
     # While Keras models support (valid) string names, we choose to only accept
     # the appropriate object instances for better type checking and to be
     # explicit about hyperparameters (e.g., within the optimizer).
-    optimizer: tf.keras.Optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
+    optimizer: Any = dataclasses.field(default_factory=lambda: tf.keras.optimizers.Adam(learning_rate=1e-3))
     epochs: int = 10
 
 
