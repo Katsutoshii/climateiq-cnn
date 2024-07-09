@@ -228,7 +228,8 @@ class IncrementalTrainDataGenerator:
                          n: int = constants.N_FLOOD_MAPS) -> Iterator[Tuple[Input, tf.Tensor]]:
         """Generate inputs for a sliding time window of length n timesteps."""
         (T_max, H, W, *_) = labels.shape
-        for t in range(T_max):
+        time_steps = list(range(T_max))
+        for t in random.choices(time_steps, k=3):
             window_input = Input(
                 geospatial=input["geospatial"],
                 temporal=cls.extract_temporal(t, n, input["temporal"]),
